@@ -2,7 +2,10 @@
 
 # Extract VS Code version from code-server
 get_vscode_version() {
-    code-server --version | head -n1
+    # FIX: Previously, this returned the full version string (e.g., "4.108.1 ba588...").
+    # This caused jq to fail with "Invalid numeric literal" because it couldn't parse the non-numeric hash.
+    # SOLUTION: Use grep to extract only the semantic version number (X.Y.Z) to ensure jq compatibility.
+    code-server --version | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | tail -n1
 }
 
 # Get user-data-dir from running code-server process

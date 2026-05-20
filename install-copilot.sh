@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
 
-# Extract VS Code version from code-server
-get_vscode_version() {
-code-server --version | head -n1 | awk '{print $1}'
+# Extract the underlying VS Code engine version bundled inside code-server
+# code-server outputs: "<code-server-ver> <commit> with Code <engine-ver>"
+get_engine_version() {
+    local version_output
+    version_output=$(code-server --version | head -n1)
+
+    # Extract the engine version from the "with Code X.Y.Z" suffix
+    if echo "$version_output" | grep -q "with Code"; then
+        echo "$version_output" | sed -n 's/.*with Code \([0-9.]*\).*/\1/p'
+    else
+        # Fallback: use the first token (older builds that omit the suffix)
+        echo "$version_output" | awk '{print $1}'
+    fi
 }
 
 # Get user-data-dir from running code-server process
@@ -16,14 +26,27 @@ get_user_data_dir() {
     fi
 
     if [ -n "$process_info" ]; then
-        echo "$process_info" | grep -o -- '--user-data-dir=[^ ]*' | sed 's/--user-data-dir=//'
+        # Check for --user-data-dir=value format
+        local dir
+        dir=$(echo "$process_info" | grep -o -- '--user-data-dir=[^ ]*' | sed 's/--user-data-dir=//')
+        if [ -n "$dir" ]; then
+            echo "$dir"
+            return
+        fi
+
+        # Check for --user-data-dir value format
+        dir=$(echo "$process_info" | grep -o -- '--user-data-dir [^ ]*' | sed 's/--user-data-dir //')
+        if [ -n "$dir" ]; then
+            echo "$dir"
+            return
+        fi
     fi
 }
 
 # Find compatible extension version
 find_compatible_version() {
     local extension_id="$1"
-    local vscode_version="$2"
+    local engine_version="$2"
 
     local response
     response=$(curl -s -X POST "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery" \
@@ -40,21 +63,21 @@ find_compatible_version() {
             \"flags\": 4112
         }")
 
-    echo "$response" | jq -r --arg vscode_version "$vscode_version" '
+    echo "$response" | jq -r --arg engine_version "$engine_version" '
         .results[0].extensions[0].versions[] |
         select(.version | test("^[0-9]+\\.[0-9]+\\.[0-9]*$")) |
-        select(.version | length < 8) |
+        select(all(.properties[]; .key != "Microsoft.VisualStudio.Code.PreRelease" or .value != "true")) |
         {
             version: .version,
             engine: (.properties[] | select(.key == "Microsoft.VisualStudio.Code.Engine") | .value)
         } |
         select(.engine | ltrimstr("^") | split(".") |
-            map(split("-")[0] | tonumber?) as $engine_parts |
-            ($vscode_version | split(".") | map(tonumber)) as $vscode_parts |
+            map(split("-")[0] | tonumber? // 0) as $engine_parts |
+            ($engine_version | split(".") | map(split("-")[0] | tonumber? // 0)) as $server_parts |
             (
-                ($engine_parts[0] // 0) < $vscode_parts[0] or
-                (($engine_parts[0] // 0) == $vscode_parts[0] and ($engine_parts[1] // 0) < $vscode_parts[1]) or
-                (($engine_parts[0] // 0) == $vscode_parts[0] and ($engine_parts[1] // 0) == $vscode_parts[1] and ($engine_parts[2] // 0) <= $vscode_parts[2])
+                ($engine_parts[0] // 0) < $server_parts[0] or
+                (($engine_parts[0] // 0) == $server_parts[0] and ($engine_parts[1] // 0) < $server_parts[1]) or
+                (($engine_parts[0] // 0) == $server_parts[0] and ($engine_parts[1] // 0) == $server_parts[1] and ($engine_parts[2] // 0) <= $server_parts[2])
             )
         ) |
         .version' | head -n 1
@@ -137,15 +160,15 @@ echo ""
 # Check dependencies
 check_dependencies
 
-# Get VS Code version
-VSCODE_VERSION="$(get_vscode_version)"
+# Get the VS Code engine version bundled in this code-server build
+ENGINE_VERSION="$(get_engine_version)"
 
-if [ -z "$VSCODE_VERSION" ]; then
-    echo "Error: Could not extract VS Code version from code-server"
+if [ -z "$ENGINE_VERSION" ]; then
+    echo "Error: Could not extract engine version from code-server"
     exit 1
 fi
 
-echo "Detected VS Code version: $VSCODE_VERSION"
+echo "Detected code-server engine version: $ENGINE_VERSION"
 
 # Check for user-data-dir in running code-server
 USER_DATA_DIR="$(get_user_data_dir)"
@@ -163,8 +186,8 @@ FAILED=0
 for ext in $EXTENSIONS; do
     echo "Processing $ext..."
 
-    # Find compatible version
-    version="$(find_compatible_version "$ext" "$VSCODE_VERSION")"
+    # Find compatible version for the detected code-server engine
+    version="$(find_compatible_version "$ext" "$ENGINE_VERSION")"
 
     if [ -z "$version" ]; then
         echo "  ✗ No compatible version found for $ext"
